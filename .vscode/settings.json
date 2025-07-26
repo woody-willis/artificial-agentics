@@ -1,0 +1,21 @@
+{
+    "files.exclude": {
+        "**/node_modules": true,
+        "**/dist": true,
+        "**/build": true,
+        "**/.git": true
+    },
+    "search.exclude": {
+        "**/node_modules": true,
+        "**/dist": true,
+        "**/build": true
+    },
+    "typescript.tsserver.maxTsServerMemory": 4096,
+    "typescript.enablePromptUseWorkspaceTsdk": false,
+    "typescript.tsserver.experimental.enableProjectDiagnostics": false,
+    "typescript.preferences.includePackageJsonAutoImports": "on",
+    "typescript.tsserver.log": "off",
+    "typescript.suggest.autoImports": true,
+    "files.autoSave": "afterDelay",
+    "files.autoSaveDelay": 2000
+}
