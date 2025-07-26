@@ -3,6 +3,8 @@
  * @file This agent manages the roles within the development team to complete tasks efficiently and accurately.
  */
 
+import "dotenv/config";
+
 import { Annotation, CompiledStateGraph, END, START, StateGraph } from "@langchain/langgraph";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
@@ -82,31 +84,16 @@ export class DevelopmentTeamManager {
             ReadFile(this.tempPath),
             ListDirectory(this.tempPath),
             PathExists(this.tempPath),
-            SearchFiles(this.tempPath)
+            // SearchFiles(this.tempPath)
         ];
 
         this.modelInstance = createModelInstance({
-            temperature: 0.2,
+            temperature: 0.3,
             maxRetries: 3,
             verbose: verbose,
         });
         this.modelInstance.bindTools(this.tools);
 
-        // this.agentInstance = createReactAgent({
-        //     llm: this.modelInstance,
-        //     tools: [
-        //         ReadFile(this.tempPath),
-        //         ListDirectory(this.tempPath),
-        //         PathExists(this.tempPath),
-        //         SearchFiles(this.tempPath)
-        //     ],
-        //     prompt: new SystemMessage({
-        //         content: 'You are the team manager of a development team. You are given a task to be completed and you must create a detailed plan to achieve the task. You must always return valid JSON fenced by a markdown code block. Do not return any additional text.',
-        //     }),
-        //     responseFormat: z.object({
-        //         plan: z.string(),
-        //     }),
-        // });
         this.agentInstance = this.createStateGraph();
     }
 
@@ -150,7 +137,7 @@ export class DevelopmentTeamManager {
         }
 
         const systemMessage = new SystemMessage({
-            content: 'You are the team manager of a development team. You are given a task to be completed and you must create a detailed plan to achieve the task.'
+            content: 'You are the team manager of a development team. You are given a task to be completed and you must create a detailed plan to achieve the task. You must use the tools provided to you to gather information and create a plan. Through the tools, you are given access to the Git repository of the project that you are working on.'
         });
 
         const allMessages = [systemMessage, ...messages];
@@ -204,15 +191,14 @@ export class DevelopmentTeamManager {
         const { messages } = state;
 
         const response = await createModelInstance({
-            modelName: "qwen3",
             temperature: 0,
             maxRetries: 3,
             verbose: false
-        }).invoke(
+        }).withStructuredOutput(this.responseSchema).invoke(
             [
                 ...messages,
                 new HumanMessage({
-                    content: "Please format the response as valid JSON with a single key 'plan' containing the detailed plan for the task as a string. The response should be fenced with a markdown code block."
+                    content: "Please format the response as valid JSON."
                 }),
             ],
             {
@@ -226,14 +212,7 @@ export class DevelopmentTeamManager {
         const lastMessage = response.text;
 
         try {
-            let responseContent = lastMessage;
-            
-            const jsonMatch = responseContent.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-            if (jsonMatch) {
-                responseContent = jsonMatch[1];
-            }
-            
-            const parsedResponse = JSON.parse(responseContent);
+            const parsedResponse = JSON.parse(lastMessage);
             const validatedResponse = this.responseSchema.parse(parsedResponse);
             
             return {
@@ -324,6 +303,8 @@ export class DevelopmentTeamManager {
         if (!plan) {
             throw new Error("Failed to generate a plan");
         }
+
+        // console.log(`Generated plan: ${plan}`);
 
         return true;
     }

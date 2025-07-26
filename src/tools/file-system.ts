@@ -12,6 +12,7 @@ import { OpenAIEmbeddings } from '@langchain/openai';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
+import { OllamaEmbeddings } from '@langchain/ollama';
 
 /**
  * Creates a temporary directory for agent files.
@@ -191,11 +192,11 @@ const getProcessableFiles = async (dirPath: string): Promise<string[]> => {
 export const SearchFiles = (tempPath: string) => {
     return new DynamicTool({
         name: 'search_files',
-        description: 'Searches for files in a directory based on a query. Input should be a JSON string with "dirPath", "query", "topK" (optional), and "includeContent" (optional) properties.',
+        description: 'Searches for files in a directory based on a query. Input should be a JSON string with "dirPath", "query" and "topK" (optional) properties.',
         func: async (input: string): Promise<string> => {
             try {
-                const { dirPath, query, topK = 5, includeContent = true } = JSON.parse(input);
-                
+                const { dirPath, query, topK = 5 } = JSON.parse(input);
+
                 // Get all processable files
                 const files = await getProcessableFiles(dirPath);
 
@@ -243,7 +244,9 @@ export const SearchFiles = (tempPath: string) => {
                 }
 
                 // Create vector store and perform search
-                const embeddings = new OpenAIEmbeddings();
+                const embeddings = new OllamaEmbeddings({
+                    model: 'nomic-embed-text',
+                });
                 const vectorStore = await MemoryVectorStore.fromDocuments(documents, embeddings);
                 const searchResults = await vectorStore.similaritySearchWithScore(query, topK);
 
@@ -256,10 +259,6 @@ export const SearchFiles = (tempPath: string) => {
                             chunkIndex: doc.metadata.chunkIndex,
                             totalChunks: doc.metadata.totalChunks,
                         };
-
-                        if (includeContent) {
-                            result.content = doc.pageContent;
-                        }
 
                         // Get file stats
                         try {

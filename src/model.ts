@@ -5,6 +5,7 @@
 
 import { ChatOllama } from "@langchain/ollama";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import { ChatOpenAI } from "@langchain/openai";
 
 interface CreateModelInstanceOptions {
     modelName?: string;
@@ -18,19 +19,38 @@ interface CreateModelInstanceOptions {
  * @param {CreateModelInstanceOptions} options - The options for creating the model instance.
  * @returns {BaseChatModel} The created model instance.
  */
+// export function createModelInstance(options: CreateModelInstanceOptions): BaseChatModel {
+//     const {
+//         modelName = "qwen3",
+//         temperature = 0.7,
+//         maxRetries = 3,
+//         verbose = false,
+//     } = options;
+
+//     return new ChatOllama({
+//         model: modelName,
+//         temperature: temperature,
+//         maxRetries: maxRetries,
+//         lowVram: true,
+//         verbose: verbose,
+//     });
+// }
 export function createModelInstance(options: CreateModelInstanceOptions): BaseChatModel {
     const {
-        modelName = "qwen3",
+        modelName = "Qwen/Qwen3-235B-A22B",
         temperature = 0.7,
         maxRetries = 3,
         verbose = false,
     } = options;
 
-    return new ChatOllama({
+    return new ChatOpenAI({
         model: modelName,
         temperature: temperature,
         maxRetries: maxRetries,
-        lowVram: true,
         verbose: verbose,
+        apiKey: process.env.OPENAI_API_KEY,
+        configuration: {
+            baseURL: process.env.OPENAI_API_URL,
+        }
     });
 }
