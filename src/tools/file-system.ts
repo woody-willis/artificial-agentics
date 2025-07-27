@@ -3,16 +3,17 @@
  * @file This module provides agent tools for file system operations including searching using an embeddings model.
  */
 
-import { DynamicTool } from '@langchain/core/tools';
-import { Document } from '@langchain/core/documents';
-import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
-import { MemoryVectorStore } from 'langchain/vectorstores/memory';
-import { OpenAIEmbeddings } from '@langchain/openai';
+import { DynamicStructuredTool } from "@langchain/core/tools";
+import { Document } from "@langchain/core/documents";
+import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
+import { MemoryVectorStore } from "langchain/vectorstores/memory";
+import { OpenAIEmbeddings } from "@langchain/openai";
 
-import * as fs from 'fs';
-import * as fsp from 'fs/promises';
-import * as path from 'path';
-import { OllamaEmbeddings } from '@langchain/ollama';
+import * as fs from "fs";
+import * as fsp from "fs/promises";
+import * as path from "path";
+import { OllamaEmbeddings } from "@langchain/ollama";
+import z from "zod";
 
 /**
  * Creates a temporary directory for agent files.
@@ -22,17 +23,17 @@ import { OllamaEmbeddings } from '@langchain/ollama';
  * @returns {string} The path to the created temporary agent directory.
  */
 export function createTempAgentDirectory(): string {
-    const tempDir = path.join(process.cwd(), 'temp');
+    const tempDir = path.join(process.cwd(), "temp");
     if (!fs.existsSync(tempDir)) {
         fs.mkdirSync(tempDir, { recursive: true });
     }
 
     const randomSuffix = Math.random().toString(36).substring(2, 15);
-    const tempAgentDir = path.join(tempDir, 'agent_' + randomSuffix);
+    const tempAgentDir = path.join(tempDir, "agent_" + randomSuffix);
     fs.mkdirSync(tempAgentDir, { recursive: true });
 
     return tempAgentDir;
-};
+}
 
 /**
  * Deletes the temporary agent directory.
@@ -46,14 +47,23 @@ export function deleteTempAgentDirectory(tempPath: string): void {
 }
 
 export const ReadFile = (tempPath: string) => {
-    return new DynamicTool({
-        name: 'read_file',
-        description: 'Reads the contents of a file. Input should be a JSON string with a "filePath" property.',
-        func: async (input: string): Promise<string> => {
+    const schema = z.object({
+        filePath: z
+            .string()
+            .describe(
+                "The path to the file to read, relative to the temporary agent directory."
+            ),
+    });
+
+    return new DynamicStructuredTool({
+        name: "read_file",
+        description: "Reads the contents of a file.",
+        schema: schema,
+        func: async (input: z.infer<typeof schema>): Promise<string> => {
             try {
-                const { filePath } = JSON.parse(input);
+                const { filePath } = input;
                 const absolutePath = path.join(tempPath, filePath);
-                return fsp.readFile(absolutePath, 'utf-8');
+                return fsp.readFile(absolutePath, "utf-8");
             } catch (error) {
                 return `Error reading file: ${(error as Error).message}`;
             }
@@ -62,14 +72,47 @@ export const ReadFile = (tempPath: string) => {
 };
 
 export const WriteFile = (tempPath: string) => {
-    return new DynamicTool({
-        name: 'write_file',
-        description: 'Writes content to a file. Input should be a JSON string with "filePath" and "content" properties.',
-        func: async (input: string): Promise<string> => {
+    const schema = z.object({
+        filePath: z
+            .string()
+            .describe(
+                "The path to the file to write, relative to the temporary agent directory."
+            ),
+        content: z.string().describe("The content to write to the file."),
+    });
+
+    return new DynamicStructuredTool({
+        name: "write_file",
+        description: "Writes content to a file.",
+        schema: schema,
+        func: async (input: z.infer<typeof schema>): Promise<string> => {
             try {
-                const { filePath, content } = JSON.parse(input);
+                const { filePath, content } = input;
                 const absolutePath = path.join(tempPath, filePath);
-                await fsp.writeFile(absolutePath, content, 'utf-8');
+
+                let cleanedContent = content.trim();
+
+                // Strip speech marks from beginning and end of content
+                if (cleanedContent.startsWith('"')) {
+                    cleanedContent = cleanedContent.slice(1);
+                }
+                if (cleanedContent.endsWith('"')) {
+                    cleanedContent = cleanedContent.slice(0, -1);
+                }
+
+                // Replace newlines ascii with actual newlines
+                cleanedContent = cleanedContent.replace(/\\n/g, "\n");
+
+                // Remove weird backslashed characters
+                cleanedContent = cleanedContent
+                    .replace(/\\'/g, "'")
+                    .replace(/\\"/g, '"')
+                    .replace(/\\`/g, "`")
+                    .replace(/\\\$/g, "$")
+                    .replace(/\\\\/g, "\\");
+
+                await fsp.writeFile(absolutePath, cleanedContent, "utf-8");
+
                 return `Successfully wrote to ${filePath}`;
             } catch (error) {
                 return `Error writing file: ${(error as Error).message}`;
@@ -79,12 +122,21 @@ export const WriteFile = (tempPath: string) => {
 };
 
 export const DeleteFile = (tempPath: string) => {
-    return new DynamicTool({
-        name: 'delete_file',
-        description: 'Deletes a file. Input should be a JSON string with a "filePath" property.',
-        func: async (input: string): Promise<string> => {
+    const schema = z.object({
+        filePath: z
+            .string()
+            .describe(
+                "The path to the file to delete, relative to the temporary agent directory."
+            ),
+    });
+
+    return new DynamicStructuredTool({
+        name: "delete_file",
+        description: "Deletes a file.",
+        schema: schema,
+        func: async (input: z.infer<typeof schema>): Promise<string> => {
             try {
-                const { filePath } = JSON.parse(input);
+                const { filePath } = input;
                 const absolutePath = path.join(tempPath, filePath);
                 await fsp.unlink(absolutePath);
                 return `Successfully deleted ${filePath}`;
@@ -96,15 +148,26 @@ export const DeleteFile = (tempPath: string) => {
 };
 
 export const ListDirectory = (tempPath: string) => {
-    return new DynamicTool({
-        name: 'list_directory',
-        description: 'Lists the contents of a directory. Input should be a JSON string with a "dirPath" property.',
-        func: async (input: string): Promise<string> => {
+    const schema = z.object({
+        dirPath: z
+            .string()
+            .describe(
+                "The path to the directory to list, relative to the temporary agent directory."
+            ),
+    });
+
+    return new DynamicStructuredTool({
+        name: "list_directory",
+        description: "Lists the contents of a directory.",
+        schema: schema,
+        func: async (input: z.infer<typeof schema>): Promise<string> => {
             try {
-                const { dirPath } = JSON.parse(input);
+                const { dirPath } = input;
                 const absolutePath = path.join(tempPath, dirPath);
-                const items = await fsp.readdir(absolutePath, { withFileTypes: true });
-                const result = items.map(item => {
+                const items = await fsp.readdir(absolutePath, {
+                    withFileTypes: true,
+                });
+                const result = items.map((item) => {
                     return item.isDirectory() ? `${item.name}/` : item.name;
                 });
                 return JSON.stringify(result);
@@ -116,12 +179,21 @@ export const ListDirectory = (tempPath: string) => {
 };
 
 export const CreateDirectory = (tempPath: string) => {
-    return new DynamicTool({
-        name: 'create_directory',
-        description: 'Creates a new directory. Input should be a JSON string with a "dirPath" property.',
-        func: async (input: string): Promise<string> => {
+    const schema = z.object({
+        dirPath: z
+            .string()
+            .describe(
+                "The path to the directory to create, relative to the temporary agent directory."
+            ),
+    });
+
+    return new DynamicStructuredTool({
+        name: "create_directory",
+        description: "Creates a new directory.",
+        schema: schema,
+        func: async (input: z.infer<typeof schema>): Promise<string> => {
             try {
-                const { dirPath } = JSON.parse(input);
+                const { dirPath } = input;
                 const absolutePath = path.join(tempPath, dirPath);
                 await fsp.mkdir(absolutePath, { recursive: true });
                 return `Successfully created directory ${dirPath}`;
@@ -132,13 +204,48 @@ export const CreateDirectory = (tempPath: string) => {
     });
 };
 
-export const PathExists = (tempPath: string) => {
-    return new DynamicTool({
-        name: 'path_exists',
-        description: 'Checks if a path exists. Input should be a JSON string with a "pathToCheck" property.',
-        func: async (input: string): Promise<string> => {
+export const RemoveDirectory = (tempPath: string) => {
+    const schema = z.object({
+        dirPath: z
+            .string()
+            .describe(
+                "The path to the directory to remove, relative to the temporary agent directory."
+            ),
+    });
+
+    return new DynamicStructuredTool({
+        name: "remove_directory",
+        description: "Removes a directory.",
+        schema: schema,
+        func: async (input: z.infer<typeof schema>): Promise<string> => {
             try {
-                const { pathToCheck } = JSON.parse(input);
+                const { dirPath } = input;
+                const absolutePath = path.join(tempPath, dirPath);
+                await fsp.rmdir(absolutePath, { recursive: true });
+                return `Successfully removed directory ${dirPath}`;
+            } catch (error) {
+                return `Error removing directory: ${(error as Error).message}`;
+            }
+        },
+    });
+};
+
+export const PathExists = (tempPath: string) => {
+    const schema = z.object({
+        pathToCheck: z
+            .string()
+            .describe(
+                "The path to check, relative to the temporary agent directory."
+            ),
+    });
+
+    return new DynamicStructuredTool({
+        name: "path_exists",
+        description: "Checks if a path exists.",
+        schema: schema,
+        func: async (input: z.infer<typeof schema>): Promise<string> => {
+            try {
+                const { pathToCheck } = input;
                 const absolutePath = path.join(tempPath, pathToCheck);
                 try {
                     await fsp.access(absolutePath);
@@ -154,7 +261,26 @@ export const PathExists = (tempPath: string) => {
 };
 
 const shouldProcessFile = (filePath: string): boolean => {
-    const textExtensions = ['.txt', '.md', '.js', '.ts', '.py', '.java', '.cpp', '.c', '.h', '.css', '.html', '.xml', '.json', '.yaml', '.yml', '.sql', '.sh', '.bat'];
+    const textExtensions = [
+        ".txt",
+        ".md",
+        ".js",
+        ".ts",
+        ".py",
+        ".java",
+        ".cpp",
+        ".c",
+        ".h",
+        ".css",
+        ".html",
+        ".xml",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".sql",
+        ".sh",
+        ".bat",
+    ];
     const ext = path.extname(filePath).toLowerCase();
     return textExtensions.includes(ext);
 };
@@ -172,7 +298,15 @@ const getProcessableFiles = async (dirPath: string): Promise<string[]> => {
 
                 if (stats.isDirectory()) {
                     // Skip common directories that shouldn't be indexed
-                    if (!['node_modules', '.git', '.vscode', 'dist', 'build'].includes(item)) {
+                    if (
+                        ![
+                            "node_modules",
+                            ".git",
+                            ".vscode",
+                            "dist",
+                            "build",
+                        ].includes(item)
+                    ) {
                         await processDir(itemPath);
                     }
                 } else if (stats.isFile() && shouldProcessFile(itemPath)) {
@@ -181,7 +315,9 @@ const getProcessableFiles = async (dirPath: string): Promise<string[]> => {
             }
         } catch (error) {
             // Skip directories we can't read
-            console.warn(`Skipping directory ${currentPath}: ${(error as Error).message}`);
+            console.warn(
+                `Skipping directory ${currentPath}: ${(error as Error).message}`
+            );
         }
     };
 
@@ -190,12 +326,27 @@ const getProcessableFiles = async (dirPath: string): Promise<string[]> => {
 };
 
 export const SearchFiles = (tempPath: string) => {
-    return new DynamicTool({
-        name: 'search_files',
-        description: 'Searches for files in a directory based on a query. Input should be a JSON string with "dirPath", "query" and "topK" (optional) properties.',
-        func: async (input: string): Promise<string> => {
+    const schema = z.object({
+        dirPath: z
+            .string()
+            .describe(
+                "The path to the directory to search, relative to the temporary agent directory."
+            ),
+        query: z.string().describe("The search query."),
+        topK: z
+            .number()
+            .min(1)
+            .optional()
+            .describe("The number of top results to return."),
+    });
+
+    return new DynamicStructuredTool({
+        name: "search_files",
+        description: "Searches for files in a directory based on a query.",
+        schema: schema,
+        func: async (input: z.infer<typeof schema>): Promise<string> => {
             try {
-                const { dirPath, query, topK = 5 } = JSON.parse(input);
+                const { dirPath, query, topK = 5 } = input;
 
                 // Get all processable files
                 const files = await getProcessableFiles(dirPath);
@@ -204,7 +355,7 @@ export const SearchFiles = (tempPath: string) => {
                     return JSON.stringify({
                         success: true,
                         results: [],
-                        message: 'No processable files found in the directory',
+                        message: "No processable files found in the directory",
                     });
                 }
 
@@ -217,21 +368,25 @@ export const SearchFiles = (tempPath: string) => {
 
                 for (const filePath of files) {
                     try {
-                        const content = await fsp.readFile(filePath, 'utf-8');
+                        const content = await fsp.readFile(filePath, "utf-8");
                         const chunks = await textSplitter.splitText(content);
 
                         for (let i = 0; i < chunks.length; i++) {
-                            documents.push(new Document({
-                                pageContent: chunks[i],
-                                metadata: {
-                                    filePath,
-                                    chunkIndex: i,
-                                    totalChunks: chunks.length,
-                                },
-                            }));
+                            documents.push(
+                                new Document({
+                                    pageContent: chunks[i],
+                                    metadata: {
+                                        filePath,
+                                        chunkIndex: i,
+                                        totalChunks: chunks.length,
+                                    },
+                                })
+                            );
                         }
                     } catch (error) {
-                        console.warn(`Skipping file ${filePath}: ${(error as Error).message}`);
+                        console.warn(
+                            `Skipping file ${filePath}: ${(error as Error).message}`
+                        );
                     }
                 }
 
@@ -239,16 +394,20 @@ export const SearchFiles = (tempPath: string) => {
                     return JSON.stringify({
                         success: true,
                         results: [],
-                        message: 'No content could be extracted from files',
+                        message: "No content could be extracted from files",
                     });
                 }
 
                 // Create vector store and perform search
                 const embeddings = new OllamaEmbeddings({
-                    model: 'nomic-embed-text',
+                    model: "nomic-embed-text",
                 });
-                const vectorStore = await MemoryVectorStore.fromDocuments(documents, embeddings);
-                const searchResults = await vectorStore.similaritySearchWithScore(query, topK);
+                const vectorStore = await MemoryVectorStore.fromDocuments(
+                    documents,
+                    embeddings
+                );
+                const searchResults =
+                    await vectorStore.similaritySearchWithScore(query, topK);
 
                 // Format results
                 const results = await Promise.all(
@@ -297,6 +456,6 @@ export const fileSystemTools = (tempPath: string) => {
         ListDirectory(tempPath),
         CreateDirectory(tempPath),
         PathExists(tempPath),
-        SearchFiles(tempPath)
+        SearchFiles(tempPath),
     ];
-}
+};

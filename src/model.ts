@@ -35,9 +35,12 @@ interface CreateModelInstanceOptions {
 //         verbose: verbose,
 //     });
 // }
-export function createModelInstance(options: CreateModelInstanceOptions): BaseChatModel {
+export function createModelInstance(
+    options: CreateModelInstanceOptions
+): BaseChatModel {
     const {
-        modelName = "Qwen/Qwen3-235B-A22B",
+        // modelName = "Qwen/Qwen3-235B-A22B",
+        modelName = "gemini-2.0-flash-lite",
         temperature = 0.7,
         maxRetries = 3,
         verbose = false,
@@ -49,8 +52,6 @@ export function createModelInstance(options: CreateModelInstanceOptions): BaseCh
         maxRetries: maxRetries,
         verbose: verbose,
         apiKey: process.env.OPENAI_API_KEY,
-        configuration: {
-            baseURL: process.env.OPENAI_API_URL,
-        }
+        configuration: { baseURL: process.env.OPENAI_API_URL },
     });
 }
