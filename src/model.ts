@@ -40,8 +40,9 @@ export function createModelInstance(
     options: CreateModelInstanceOptions
 ): BaseChatModel {
     const {
-        modelName = "Qwen/Qwen3-32B",
+        // modelName = "Qwen/Qwen3-32B",
         // modelName = "gemini-2.0-flash-lite",
+        modelName = "qwen3",
         temperature = 0.7,
         maxRetries = 3,
         verbose = false,

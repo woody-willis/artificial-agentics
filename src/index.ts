@@ -15,7 +15,7 @@ import {
             task: DevelopmentTeamManagerInvocationTask.AddFeature,
             data: {
                 description:
-                    "Add a new agent to do code reviews on a specific branch. The agent should be able to review code changes, suggest improvements, and ensure coding standards are met. Add the agent in src/teams/development/code-reviewer.ts and ensure that the agent structure is the same as other agents in the development team.",
+                    "Add more useful git tools to src/tools/git.ts such as opening a pull request, diffing changes and getting git status.",
             },
         })
         .catch((error) => {

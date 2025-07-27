@@ -22,7 +22,6 @@ import {
 import { createModelInstance } from "../../model";
 import {
     CreateDirectory,
-    createTempAgentDirectory,
     DeleteFile,
     deleteTempAgentDirectory,
     ListDirectory,
@@ -82,9 +81,9 @@ export class DevelopmentCodeWriter {
     /**
      * Initializes the DevelopmentCodeWriter as a ReAct agent.
      */
-    constructor(verbose: boolean = false) {
+    constructor(tempPath: string, verbose: boolean = false) {
         this.threadId = "development-code-writer-" + Date.now().toString();
-        this.tempPath = createTempAgentDirectory();
+        this.tempPath = tempPath;
         this.gitInstance = simpleGit();
         this.tools = [
             SearxSearch(),
@@ -395,20 +394,20 @@ export class DevelopmentCodeWriter {
     }
 
     async init(): Promise<DevelopmentCodeWriter> {
-        this.gitInstance = await cloneRepository(
-            this.gitInstance,
-            "https://github.com/woody-willis/artificial-agentics.git",
-            this.tempPath,
-            this.threadId
-        );
+        // await cloneRepository(
+        //     this.gitInstance,
+        //     "https://github.com/woody-willis/artificial-agentics.git",
+        //     this.tempPath,
+        //     this.threadId
+        // );
 
         return this;
     }
 
     async dispose(): Promise<void> {
-        if (this.tempPath) {
-            deleteTempAgentDirectory(this.tempPath);
-        }
+        // if (this.tempPath) {
+        //     deleteTempAgentDirectory(this.tempPath);
+        // }
     }
 
     /**

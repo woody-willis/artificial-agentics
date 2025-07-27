@@ -1,6 +1,6 @@
 /**
- * @module teams/development/team-manager
- * @file This agent manages the roles within the development team to complete tasks efficiently and accurately.
+ * @module teams/development/code-reviewer
+ * @file This agent is able to review code changes, suggest improvements, and ensure coding standards are met.
  */
 
 import "dotenv/config";
@@ -21,21 +21,22 @@ import {
 
 import { createModelInstance } from "../../model";
 import {
-    createTempAgentDirectory,
+    CreateDirectory,
+    DeleteFile,
     deleteTempAgentDirectory,
     ListDirectory,
     PathExists,
     ReadFile,
+    RemoveDirectory,
     SearchFiles,
+    WriteFile,
 } from "../../tools/file-system";
-import { cloneRepository } from "../../tools/git";
+import { cloneRepository, CommitChanges } from "../../tools/git";
 import { Tool } from "@langchain/core/tools";
 import { SearxSearch } from "../../tools/search";
-import { DevelopmentCodeWriter } from "./code-writer";
 import simpleGit, { SimpleGit } from "simple-git";
 import z from "zod";
 import pino from "pino";
-import { DevelopmentCodeReviewer } from "./code-reviewer";
 
 const logger = pino({
     level: "info",
@@ -45,48 +46,47 @@ const logger = pino({
             : { target: "pino-pretty", options: { colorize: true } },
 });
 
-export enum DevelopmentTeamManagerInvocationTask {
-    AddFeature = "AddFeature",
-    FixBug = "FixBug",
+export interface DevelopmentCodeReviewerInvocationOptions {
+    diff: string;
 }
 
-export interface DevelopmentTeamManagerInvocationOptions {
-    task: DevelopmentTeamManagerInvocationTask;
-    data: Record<string, any>;
+export interface DevelopmentCodeReviewerReviewCodeOptions {
+    diff: string;
 }
 
-export interface DevelopmentTeamManagerAddFeatureOptions {
-    description: string;
-}
-
-export interface DevelopmentTeamManagerFixBugOptions {
-    location: string;
-    description: string;
-    severity: "low" | "medium" | "high" | "critical";
-    stepsToReproduce?: string[];
-    expectedBehavior?: string;
-    actualBehavior?: string;
-    additionalInfo?: string;
+export interface DevelopmentCodeReviewerReviewCodeResponse {
+    success: boolean;
+    approved: boolean;
+    suggestions?: string[];
 }
 
 const AgentState = Annotation.Root({
     messages: Annotation({ reducer: (x, y) => x.concat(y), default: () => [] }),
-    plan: Annotation({ reducer: (x, y) => y ?? x, default: () => null }),
+    success: Annotation({ reducer: (x, y) => y ?? x, default: () => false }),
+    approved: Annotation({ reducer: (x, y) => y ?? x, default: () => false }),
+    suggestions: Annotation({ reducer: (x, y) => y ?? x, default: () => [] }),
     toolCalls: Annotation({ reducer: (x, y) => y ?? x, default: () => [] }),
     iterations: Annotation({ reducer: (x, y) => y ?? x, default: () => 0 }),
     maxIterations: Annotation({ reducer: (x, y) => y ?? x, default: () => 25 }),
 });
 
-export class DevelopmentTeamManager {
+export class DevelopmentCodeReviewer {
     private threadId: string;
     private tempPath: string;
     private tools: Tool[];
     private responseSchema = z.object({
-        plan: z
-            .string()
+        success: z
+            .boolean()
+            .describe("Whether the code review was successful."),
+        approved: z
+            .boolean()
             .describe(
-                "The detailed plan for the task, including references to files to modify, create, or delete."
+                "Whether the code changes meet all standards and are approved."
             ),
+        suggestions: z
+            .array(z.string())
+            .optional()
+            .describe("Suggestions for improvements."),
     });
     private modelInstance: BaseChatModel;
     private agentInstance: CompiledStateGraph<unknown, unknown>;
@@ -94,22 +94,19 @@ export class DevelopmentTeamManager {
     private agentLogger: pino.Logger;
 
     /**
-     * Initializes the DevelopmentTeamManager as a ReAct agent.
+     * Initializes the DevelopmentCodeReviewer as a ReAct agent.
      */
-    constructor(verbose: boolean = false) {
-        this.threadId = "development-team-manager-" + Date.now().toString();
-        this.tempPath = createTempAgentDirectory();
+    constructor(tempPath: string, verbose: boolean = false) {
+        this.threadId = "development-code-reviewer-" + Date.now().toString();
+        this.tempPath = tempPath;
         this.gitInstance = simpleGit();
         this.tools = [
-            SearxSearch(),
             ReadFile(this.tempPath, this.threadId),
             ListDirectory(this.tempPath, this.threadId),
-            PathExists(this.tempPath, this.threadId),
-            // SearchFiles(this.tempPath, this.threadId)
+            // SearchFiles(this.tempPath, this.threadId),
         ];
-
         this.agentLogger = logger.child({
-            module: "teams/development/team-manager",
+            module: "teams/development/code-reviewer",
             threadId: this.threadId,
         });
 
@@ -163,7 +160,7 @@ export class DevelopmentTeamManager {
 
         const systemMessage = new SystemMessage({
             content:
-                "You are the team manager of a development team. You are given a task for which you must create a detailed plan to achieve that task. You must use the tools provided to you to gather information. The plan must align with the style and language already used in the codebase. Use the read file and list directory tools to explore the codebase. Do not write any code. Output a detailed plan in the format: { plan: 'Your detailed plan here' } only once you have gathered enough information and done enough enumeration.",
+                "You are a professional code reviewer. You must use the tools provided to you to read files in the project repository and analyse the supplied git diff. You do not need to do any testing, as that will be done by another agent. Only approve code if it matches the style and standards of existing code in the repository. Output a JSON response with the following structure: { success: true/false, approved: true/false, suggestions: ['Suggestion 1', 'Suggestion 2'] }",
         });
 
         const TOKEN_LIMIT = 30000;
@@ -277,7 +274,7 @@ export class DevelopmentTeamManager {
 
         for (let i = 0; i < 3; i++) {
             response = await this.modelInstance.invoke(allMessages, {
-                recursionLimit: 25,
+                recursionLimit: 100,
                 configurable: { thread_id: this.threadId },
             });
 
@@ -287,7 +284,7 @@ export class DevelopmentTeamManager {
         }
 
         this.agentLogger.info(
-            `Agent response length: ${response.content.length} (Iteration: ${iterations + 1})`
+            `Agent response: ${(response.content as string).substring(0, 100)} (Iteration: ${iterations + 1})`
         );
 
         return {
@@ -357,19 +354,14 @@ export class DevelopmentTeamManager {
             );
 
         try {
-            if (!response.parsed) {
-                const rawOutputParse = JSON.parse(
-                    response.raw.content as string
-                );
-                response.parsed = rawOutputParse;
-            }
-
             const parsedResponse = response.parsed;
             const validatedResponse = this.responseSchema.parse(parsedResponse);
 
             return {
                 ...state,
-                plan: validatedResponse.plan,
+                success: validatedResponse.success,
+                approved: validatedResponse.approved,
+                suggestions: validatedResponse.suggestions || [],
                 messages: [
                     ...messages,
                     new AIMessage({
@@ -412,120 +404,62 @@ export class DevelopmentTeamManager {
         return "end";
     }
 
-    async init(): Promise<DevelopmentTeamManager> {
-        await cloneRepository(
-            this.gitInstance,
-            "https://github.com/woody-willis/artificial-agentics.git",
-            this.tempPath
-        );
+    async init(): Promise<DevelopmentCodeReviewer> {
+        // await cloneRepository(
+        //     this.gitInstance,
+        //     "https://github.com/woody-willis/artificial-agentics.git",
+        //     this.tempPath,
+        //     this.threadId
+        // );
 
         return this;
     }
 
     async dispose(): Promise<void> {
-        if (this.tempPath) {
-            deleteTempAgentDirectory(this.tempPath);
-        }
+        // if (this.tempPath) {
+        //     deleteTempAgentDirectory(this.tempPath);
+        // }
     }
 
     /**
      * Invokes the agent with the specified task and data.
-     * @param {DevelopmentTeamManagerInvocationOptions} options - The options for invoking the agent.
+     * @param {DevelopmentCodeReviewerInvocationOptions} options - The options for invoking the agent.
      * @returns {Promise<string>} The response from the agent.
      */
     async invoke(
-        options: DevelopmentTeamManagerInvocationOptions
-    ): Promise<boolean> {
-        const { task, data } = options;
+        options: DevelopmentCodeReviewerInvocationOptions
+    ): Promise<DevelopmentCodeReviewerReviewCodeResponse> {
+        const { diff } = options;
 
-        switch (task) {
-            case DevelopmentTeamManagerInvocationTask.AddFeature:
-                return this.addFeature(
-                    data as DevelopmentTeamManagerAddFeatureOptions
-                );
-            case DevelopmentTeamManagerInvocationTask.FixBug:
-                return this.fixBug(data as DevelopmentTeamManagerFixBugOptions);
-            default:
-                throw new Error(`Unknown task: ${task}`);
-        }
+        return this.reviewCode({ diff });
     }
 
     /**
-     * Adds a feature based on the provided data.
-     * @param {DevelopmentTeamManagerAddFeatureOptions} data - The data for the feature to be added.
-     * @returns {Promise<boolean>} True if the feature was added successfully, false otherwise.
+     * Reviews code changes based on the git diff.
+     * @param {DevelopmentCodeReviewerReviewCodeOptions} data - The data for reviewing code.
+     * @returns {Promise<boolean>} True if the code changes were successfully reviewed, false otherwise.
      */
-    private async addFeature(
-        data: DevelopmentTeamManagerAddFeatureOptions
-    ): Promise<boolean> {
-        // Get team manager to analyse codebase and generate a detailed plan for the feature
+    private async reviewCode(
+        data: DevelopmentCodeReviewerReviewCodeOptions
+    ): Promise<DevelopmentCodeReviewerReviewCodeResponse> {
+        // Get code reviewer agent to review the code changes
         const initialState = {
             ...AgentState,
             messages: [
                 new HumanMessage({
-                    content: `Add a feature with the following description: ${data.description}\n\nCreate a detailed plan to achieve this task and reference files to modify, create or delete etc. You must use tools and read files.`,
+                    content: `Here is the git diff of the code changes to review:\n\n${data.diff}`,
                 }),
             ],
             iterations: 0,
         };
 
-        const planResponse = await this.agentInstance.invoke(initialState);
-        const plan = planResponse.plan;
+        const implementationResponse =
+            await this.agentInstance.invoke(initialState);
 
-        if (!plan) {
-            throw new Error("Failed to generate a plan");
-        }
-
-        const codeWriterAgent = await new DevelopmentCodeWriter(
-            this.tempPath
-        ).init();
-
-        const codeWriteResponse = await codeWriterAgent
-            .invoke({ plan: plan })
-            .catch((error) => {
-                console.error("Error invoking code writer agent:", error);
-                return false;
-            });
-
-        await codeWriterAgent.dispose();
-
-        if (!codeWriteResponse) {
-            throw new Error("Failed to write code based on the plan");
-        }
-
-        const gitDiff = await this.gitInstance.diff(["HEAD~2", "HEAD~1"]);
-
-        const codeReviewAgent = await new DevelopmentCodeReviewer(
-            this.tempPath
-        ).init();
-
-        const codeReviewResponse = await codeReviewAgent
-            .invoke({ diff: gitDiff })
-            .catch((error) => {
-                console.error("Error invoking code review agent:", error);
-                return { success: false, approved: false, suggestions: [] };
-            });
-
-        await codeReviewAgent.dispose();
-
-        console.log(`Code review success: ${codeReviewResponse}`);
-
-        if (!codeReviewResponse.success) {
-            throw new Error("Failed to review the code changes");
-        }
-
-        return true;
-    }
-
-    /**
-     * Fixes a bug based on the provided data.
-     * @param {DevelopmentTeamManagerFixBugOptions} data - The data for the bug to be fixed.
-     * @returns {Promise<boolean>} True if the bug was fixed successfully, false otherwise.
-     */
-    private async fixBug(
-        data: DevelopmentTeamManagerFixBugOptions
-    ): Promise<boolean> {
-        // Implement the logic for fixing a bug
-        return true;
+        return {
+            success: implementationResponse.success,
+            approved: implementationResponse.approved,
+            suggestions: implementationResponse.suggestions || [],
+        };
     }
 }
