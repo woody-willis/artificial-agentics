@@ -15,7 +15,7 @@ import {
             task: DevelopmentTeamManagerInvocationTask.AddFeature,
             data: {
                 description:
-                    "Modify the existing agents so that they can handle large prompts. They are hitting a 32k token limit at the moment and need to be able to handle larger prompts. The agents are stored in src/teams/development and the tools are in src/tools.",
+                    "Add a new agent to do code reviews on a specific branch. The agent should be able to review code changes, suggest improvements, and ensure coding standards are met. Add the agent in src/teams/development/code-reviewer.ts and ensure that the agent structure is the same as other agents in the development team.",
             },
         })
         .catch((error) => {

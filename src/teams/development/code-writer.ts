@@ -19,8 +19,6 @@ import {
     SystemMessage,
 } from "@langchain/core/messages";
 
-import z from "zod";
-
 import { createModelInstance } from "../../model";
 import {
     CreateDirectory,
@@ -38,6 +36,16 @@ import { cloneRepository, CommitChanges } from "../../tools/git";
 import { Tool } from "@langchain/core/tools";
 import { SearxSearch } from "../../tools/search";
 import simpleGit, { SimpleGit } from "simple-git";
+import z from "zod";
+import pino from "pino";
+
+const logger = pino({
+    level: "info",
+    transport:
+        process.env.ENVIRONMENT === "production"
+            ? undefined
+            : { target: "pino-pretty", options: { colorize: true } },
+});
 
 export interface DevelopmentCodeWriterInvocationOptions {
     plan: string;
@@ -69,6 +77,7 @@ export class DevelopmentCodeWriter {
     private modelInstance: BaseChatModel;
     private agentInstance: CompiledStateGraph<unknown, unknown>;
     private gitInstance: SimpleGit;
+    private agentLogger: pino.Logger;
 
     /**
      * Initializes the DevelopmentCodeWriter as a ReAct agent.
@@ -79,20 +88,23 @@ export class DevelopmentCodeWriter {
         this.gitInstance = simpleGit();
         this.tools = [
             SearxSearch(),
-            ReadFile(this.tempPath),
-            WriteFile(this.tempPath),
-            DeleteFile(this.tempPath),
-            ListDirectory(this.tempPath),
-            CreateDirectory(this.tempPath),
-            RemoveDirectory(this.tempPath),
-            // SearchFiles(this.tempPath),
+            ReadFile(this.tempPath, this.threadId),
+            WriteFile(this.tempPath, this.threadId),
+            DeleteFile(this.tempPath, this.threadId),
+            ListDirectory(this.tempPath, this.threadId),
+            CreateDirectory(this.tempPath, this.threadId),
+            RemoveDirectory(this.tempPath, this.threadId),
+            // SearchFiles(this.tempPath, this.threadId),
             CommitChanges(this.gitInstance, this.threadId),
         ];
+        this.agentLogger = logger.child({
+            module: "teams/development/code-writer",
+            threadId: this.threadId,
+        });
 
         this.modelInstance = createModelInstance({
-            modelName: "gemini-2.5-flash",
             temperature: 0.7,
-            maxRetries: 8,
+            maxRetries: 4,
             verbose: verbose,
         });
         this.modelInstance.bindTools(this.tools);
@@ -140,15 +152,132 @@ export class DevelopmentCodeWriter {
 
         const systemMessage = new SystemMessage({
             content:
-                "You are a code writer agent. You are given a plan to implement and you must use the tools provided to you to read, write, and modify files in the project repository. You do not need to do any testing, as that will be done by another agent. You can also search for information online using the Searx search tool. Make sure to commit your changes to the repository after implementing the plan. Commit messages must follow the Conventional Commits specification.",
+                "You are a professional code writer. You are given a plan to implement and you must use the tools provided to you to read, write, and modify files in the project repository. You do not need to do any testing, as that will be done by another agent. You can also search for information online using the Searx search tool. Make sure to commit your changes to the repository after implementing the plan. Commit messages must follow the Conventional Commits specification. Output a JSON response with the following structure: { success: true/false } only once you have written the code and committed it.",
         });
 
-        const allMessages = [systemMessage, ...messages];
+        const TOKEN_LIMIT = 30000;
+        const CHUNK_SIZE = 25000;
 
-        const response = await this.modelInstance.invoke(allMessages, {
-            recursionLimit: 100,
-            configurable: { thread_id: this.threadId },
-        });
+        const estimateTokens = (msgs) => {
+            const totalCharacters = msgs.reduce(
+                (acc, msg) => acc + (msg.content?.length || 0),
+                0
+            );
+            return Math.ceil(totalCharacters / 4);
+        };
+
+        const chunkMessage = (message, maxTokens = 5000) => {
+            const maxChars = maxTokens * 4;
+            if (!message.content || message.content.length <= maxChars) {
+                return [message];
+            }
+
+            const chunks = [];
+            const content = message.content;
+            let startIndex = 0;
+
+            while (startIndex < content.length) {
+                const endIndex = Math.min(
+                    startIndex + maxChars,
+                    content.length
+                );
+                let chunkEnd = endIndex;
+
+                // Try to break at natural boundaries (newlines, periods, spaces)
+                if (endIndex < content.length) {
+                    const lastNewline = content.lastIndexOf("\n", endIndex);
+                    const lastPeriod = content.lastIndexOf(".", endIndex);
+                    const lastSpace = content.lastIndexOf(" ", endIndex);
+
+                    // Use the best break point, but ensure we make progress
+                    const breakPoint = Math.max(
+                        lastNewline,
+                        lastPeriod,
+                        lastSpace
+                    );
+                    if (breakPoint > startIndex + maxChars * 0.5) {
+                        chunkEnd = breakPoint + 1;
+                    }
+                }
+
+                const chunkContent = content.substring(startIndex, chunkEnd);
+                const chunkSuffix =
+                    startIndex > 0
+                        ? ` [Chunk ${Math.floor(startIndex / maxChars) + 1}]`
+                        : chunkEnd < content.length
+                          ? " [Chunk 1]"
+                          : "";
+
+                chunks.push(
+                    new message.constructor({
+                        content: chunkContent + chunkSuffix,
+                        ...message,
+                    })
+                );
+
+                startIndex = chunkEnd;
+            }
+
+            return chunks;
+        };
+
+        // Chunk large messages first
+        let processedMessages = [];
+        for (const message of messages) {
+            const messageTokens = estimateTokens([message]);
+            if (messageTokens > 5000) {
+                const chunks = chunkMessage(message, 5000);
+                processedMessages.push(...chunks);
+            } else {
+                processedMessages.push(message);
+            }
+        }
+
+        let filteredMessages = [...processedMessages];
+        let allMessages = [systemMessage, ...filteredMessages];
+        let tokenEstimate = estimateTokens(allMessages);
+
+        // Remove oldest messages (excluding system message) until under token limit
+        while (tokenEstimate > CHUNK_SIZE && filteredMessages.length > 0) {
+            filteredMessages = filteredMessages.slice(1); // Remove oldest message
+            allMessages = [systemMessage, ...filteredMessages];
+            tokenEstimate = estimateTokens(allMessages);
+        }
+
+        // If still over limit with just system message, chunk the system message
+        if (tokenEstimate > CHUNK_SIZE) {
+            const systemTokens = estimateTokens([systemMessage]);
+            if (systemTokens > CHUNK_SIZE) {
+                const chunkedSystemMessages = chunkMessage(
+                    systemMessage,
+                    CHUNK_SIZE - 1000
+                );
+                // Use only the first chunk of system message to stay within limits
+                allMessages = [chunkedSystemMessages[0], ...filteredMessages];
+                tokenEstimate = estimateTokens(allMessages);
+            }
+        }
+
+        this.agentLogger.info(
+            `Final token estimate: ${tokenEstimate}/${TOKEN_LIMIT} (${filteredMessages.length} messages retained)`
+        );
+
+        let response: AIMessage;
+
+        for (let i = 0; i < 3; i++) {
+            response = await this.modelInstance.invoke(allMessages, {
+                recursionLimit: 100,
+                configurable: { thread_id: this.threadId },
+            });
+
+            if (response.content.length > 0) {
+                break;
+            }
+        }
+
+        this.agentLogger.info(
+            `Agent response: ${(response.content as string).substring(0, 100)} (Iteration: ${iterations + 1})`
+        );
 
         return {
             ...state,
@@ -168,12 +297,18 @@ export class DevelopmentCodeWriter {
             if (tool) {
                 try {
                     const result = await tool.invoke(toolCall.args);
+                    this.agentLogger.info(
+                        `Tool ${toolCall.name} executed successfully with result: ${JSON.stringify(result).substring(0, 100)}`
+                    );
                     toolMessages.push({
                         role: "tool",
                         content: JSON.stringify(result),
                         tool_call_id: toolCall.id,
                     });
                 } catch (error) {
+                    this.agentLogger.error(
+                        `Error executing tool ${toolCall.name}: ${error.message}`
+                    );
                     toolMessages.push({
                         role: "tool",
                         content: `Error executing ${toolCall.name}: ${error.message}`,

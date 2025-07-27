@@ -7,6 +7,15 @@ import { DynamicStructuredTool } from "@langchain/core/tools";
 import { SimpleGit } from "simple-git";
 
 import z from "zod";
+import pino from "pino";
+
+const logger = pino({
+    level: "info",
+    transport:
+        process.env.ENVIRONMENT === "production"
+            ? undefined
+            : { target: "pino-pretty", options: { colorize: true } },
+});
 
 /**
  * Clones a Git repository to a specified local path.
@@ -53,11 +62,22 @@ export const CommitChanges = (git: SimpleGit, agentId: string) => {
         message: z.string().describe("The commit message for the changes."),
     });
 
+    const functionLogger = logger.child({
+        module: "tools/git",
+        function: "CommitChanges",
+        agentId: agentId,
+    });
+
     return new DynamicStructuredTool({
         name: "commit_changes",
         description: "Commits changes in the repository with a message.",
         schema: schema,
         func: async (input: z.infer<typeof schema>): Promise<string> => {
+            functionLogger.info("Committing changes", {
+                message: input.message,
+                agentId: agentId,
+            });
+
             try {
                 const { message } = input;
                 await commitChanges(git, message, agentId);

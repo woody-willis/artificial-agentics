@@ -19,8 +19,6 @@ import {
     SystemMessage,
 } from "@langchain/core/messages";
 
-import z from "zod";
-
 import { createModelInstance } from "../../model";
 import {
     createTempAgentDirectory,
@@ -35,6 +33,16 @@ import { Tool } from "@langchain/core/tools";
 import { SearxSearch } from "../../tools/search";
 import { DevelopmentCodeWriter } from "./code-writer";
 import simpleGit, { SimpleGit } from "simple-git";
+import z from "zod";
+import pino from "pino";
+
+const logger = pino({
+    level: "info",
+    transport:
+        process.env.ENVIRONMENT === "production"
+            ? undefined
+            : { target: "pino-pretty", options: { colorize: true } },
+});
 
 export enum DevelopmentTeamManagerInvocationTask {
     AddFeature = "AddFeature",
@@ -82,6 +90,7 @@ export class DevelopmentTeamManager {
     private modelInstance: BaseChatModel;
     private agentInstance: CompiledStateGraph<unknown, unknown>;
     private gitInstance: SimpleGit;
+    private agentLogger: pino.Logger;
 
     /**
      * Initializes the DevelopmentTeamManager as a ReAct agent.
@@ -92,15 +101,20 @@ export class DevelopmentTeamManager {
         this.gitInstance = simpleGit();
         this.tools = [
             SearxSearch(),
-            ReadFile(this.tempPath),
-            ListDirectory(this.tempPath),
-            PathExists(this.tempPath),
-            // SearchFiles(this.tempPath)
+            ReadFile(this.tempPath, this.threadId),
+            ListDirectory(this.tempPath, this.threadId),
+            PathExists(this.tempPath, this.threadId),
+            // SearchFiles(this.tempPath, this.threadId)
         ];
 
+        this.agentLogger = logger.child({
+            module: "teams/development/team-manager",
+            threadId: this.threadId,
+        });
+
         this.modelInstance = createModelInstance({
-            temperature: 0.3,
-            maxRetries: 8,
+            temperature: 0.7,
+            maxRetries: 4,
             verbose: verbose,
         });
         this.modelInstance.bindTools(this.tools);
@@ -148,15 +162,132 @@ export class DevelopmentTeamManager {
 
         const systemMessage = new SystemMessage({
             content:
-                "You are the team manager of a development team. You are given a task to be completed and you must create a detailed plan to achieve the task. You must use the tools provided to you to gather information and create a plan. Through the tools, you are given access to the Git repository of the project that you are working on.",
+                "You are the team manager of a development team. You are given a task for which you must create a detailed plan to achieve that task. You must use the tools provided to you to gather information. The plan must align with the style and language already used in the codebase. Use the read file and list directory tools to explore the codebase. Output a detailed plan in the format: { plan: 'Your detailed plan here' } only once you have gathered enough information and done enough enumeration.",
         });
 
-        const allMessages = [systemMessage, ...messages];
+        const TOKEN_LIMIT = 30000;
+        const CHUNK_SIZE = 25000;
 
-        const response = await this.modelInstance.invoke(allMessages, {
-            recursionLimit: 25,
-            configurable: { thread_id: this.threadId },
-        });
+        const estimateTokens = (msgs) => {
+            const totalCharacters = msgs.reduce(
+                (acc, msg) => acc + (msg.content?.length || 0),
+                0
+            );
+            return Math.ceil(totalCharacters / 4);
+        };
+
+        const chunkMessage = (message, maxTokens = 5000) => {
+            const maxChars = maxTokens * 4;
+            if (!message.content || message.content.length <= maxChars) {
+                return [message];
+            }
+
+            const chunks = [];
+            const content = message.content;
+            let startIndex = 0;
+
+            while (startIndex < content.length) {
+                const endIndex = Math.min(
+                    startIndex + maxChars,
+                    content.length
+                );
+                let chunkEnd = endIndex;
+
+                // Try to break at natural boundaries (newlines, periods, spaces)
+                if (endIndex < content.length) {
+                    const lastNewline = content.lastIndexOf("\n", endIndex);
+                    const lastPeriod = content.lastIndexOf(".", endIndex);
+                    const lastSpace = content.lastIndexOf(" ", endIndex);
+
+                    // Use the best break point, but ensure we make progress
+                    const breakPoint = Math.max(
+                        lastNewline,
+                        lastPeriod,
+                        lastSpace
+                    );
+                    if (breakPoint > startIndex + maxChars * 0.5) {
+                        chunkEnd = breakPoint + 1;
+                    }
+                }
+
+                const chunkContent = content.substring(startIndex, chunkEnd);
+                const chunkSuffix =
+                    startIndex > 0
+                        ? ` [Chunk ${Math.floor(startIndex / maxChars) + 1}]`
+                        : chunkEnd < content.length
+                          ? " [Chunk 1]"
+                          : "";
+
+                chunks.push(
+                    new message.constructor({
+                        content: chunkContent + chunkSuffix,
+                        ...message,
+                    })
+                );
+
+                startIndex = chunkEnd;
+            }
+
+            return chunks;
+        };
+
+        // Chunk large messages first
+        let processedMessages = [];
+        for (const message of messages) {
+            const messageTokens = estimateTokens([message]);
+            if (messageTokens > 5000) {
+                const chunks = chunkMessage(message, 5000);
+                processedMessages.push(...chunks);
+            } else {
+                processedMessages.push(message);
+            }
+        }
+
+        let filteredMessages = [...processedMessages];
+        let allMessages = [systemMessage, ...filteredMessages];
+        let tokenEstimate = estimateTokens(allMessages);
+
+        // Remove oldest messages (excluding system message) until under token limit
+        while (tokenEstimate > CHUNK_SIZE && filteredMessages.length > 0) {
+            filteredMessages = filteredMessages.slice(1); // Remove oldest message
+            allMessages = [systemMessage, ...filteredMessages];
+            tokenEstimate = estimateTokens(allMessages);
+        }
+
+        // If still over limit with just system message, chunk the system message
+        if (tokenEstimate > CHUNK_SIZE) {
+            const systemTokens = estimateTokens([systemMessage]);
+            if (systemTokens > CHUNK_SIZE) {
+                const chunkedSystemMessages = chunkMessage(
+                    systemMessage,
+                    CHUNK_SIZE - 1000
+                );
+                // Use only the first chunk of system message to stay within limits
+                allMessages = [chunkedSystemMessages[0], ...filteredMessages];
+                tokenEstimate = estimateTokens(allMessages);
+            }
+        }
+
+        this.agentLogger.info(
+            `Final token estimate: ${tokenEstimate}/${TOKEN_LIMIT} (${filteredMessages.length} messages retained)`
+        );
+
+        let response: AIMessage;
+
+        for (let i = 0; i < 3; i++) {
+            response = await this.modelInstance.invoke(allMessages, {
+                recursionLimit: 25,
+                configurable: { thread_id: this.threadId },
+            });
+
+            if (response.content.length > 0) {
+                break;
+            }
+        }
+
+        this.agentLogger.info(
+            `Agent response length: ${response.content.length} (Iteration: ${iterations + 1})`
+        );
 
         return {
             ...state,
@@ -176,12 +307,18 @@ export class DevelopmentTeamManager {
             if (tool) {
                 try {
                     const result = await tool.invoke(toolCall.args);
+                    this.agentLogger.info(
+                        `Tool ${toolCall.name} executed successfully with result: ${JSON.stringify(result).substring(0, 100)}`
+                    );
                     toolMessages.push({
                         role: "tool",
                         content: JSON.stringify(result),
                         tool_call_id: toolCall.id,
                     });
                 } catch (error) {
+                    this.agentLogger.error(
+                        `Error executing tool ${toolCall.name}: ${error.message}`
+                    );
                     toolMessages.push({
                         role: "tool",
                         content: `Error executing ${toolCall.name}: ${error.message}`,
@@ -325,7 +462,7 @@ export class DevelopmentTeamManager {
             ...AgentState,
             messages: [
                 new HumanMessage({
-                    content: `Add a feature with the following description: ${data.description}\n\nCreate a detailed plan to achieve this task using the tools given to you including references to which files to modify, create or delete etc. Use tools to make your plan specific.`,
+                    content: `Add a feature with the following description: ${data.description}\n\nCreate a detailed plan to achieve this task and reference files to modify, create or delete etc. You must use tools and read files.`,
                 }),
             ],
             iterations: 0,

@@ -5,7 +5,8 @@
 
 import { ChatOllama } from "@langchain/ollama";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import { ChatOpenAI } from "@langchain/openai";
+import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
+import { Embeddings } from "@langchain/core/embeddings";
 
 interface CreateModelInstanceOptions {
     modelName?: string;
@@ -39,8 +40,8 @@ export function createModelInstance(
     options: CreateModelInstanceOptions
 ): BaseChatModel {
     const {
-        // modelName = "Qwen/Qwen3-235B-A22B",
-        modelName = "gemini-2.0-flash-lite",
+        modelName = "Qwen/Qwen3-32B",
+        // modelName = "gemini-2.0-flash-lite",
         temperature = 0.7,
         maxRetries = 3,
         verbose = false,
@@ -49,6 +50,24 @@ export function createModelInstance(
     return new ChatOpenAI({
         model: modelName,
         temperature: temperature,
+        maxRetries: maxRetries,
+        verbose: verbose,
+        apiKey: process.env.OPENAI_API_KEY,
+        configuration: { baseURL: process.env.OPENAI_API_URL },
+    });
+}
+
+export function createEmbeddingModelInstance(
+    options: CreateModelInstanceOptions
+): Embeddings {
+    const {
+        modelName = "gemini-embedding-001",
+        maxRetries = 3,
+        verbose = false,
+    } = options;
+
+    return new OpenAIEmbeddings({
+        model: modelName,
         maxRetries: maxRetries,
         verbose: verbose,
         apiKey: process.env.OPENAI_API_KEY,

@@ -14,6 +14,16 @@ import * as fsp from "fs/promises";
 import * as path from "path";
 import { OllamaEmbeddings } from "@langchain/ollama";
 import z from "zod";
+import pino from "pino";
+import { createEmbeddingModelInstance } from "../model";
+
+const logger = pino({
+    level: "info",
+    transport:
+        process.env.ENVIRONMENT === "production"
+            ? undefined
+            : { target: "pino-pretty", options: { colorize: true } },
+});
 
 /**
  * Creates a temporary directory for agent files.
@@ -46,7 +56,7 @@ export function deleteTempAgentDirectory(tempPath: string): void {
     }
 }
 
-export const ReadFile = (tempPath: string) => {
+export const ReadFile = (tempPath: string, agentId: string) => {
     const schema = z.object({
         filePath: z
             .string()
@@ -55,11 +65,20 @@ export const ReadFile = (tempPath: string) => {
             ),
     });
 
+    const functionLogger = logger.child({
+        agentId: agentId,
+        module: "tools/file-system",
+        function: "ReadFile",
+        tempPath: tempPath,
+    });
+
     return new DynamicStructuredTool({
         name: "read_file",
         description: "Reads the contents of a file.",
         schema: schema,
         func: async (input: z.infer<typeof schema>): Promise<string> => {
+            functionLogger.info("Reading file", { filePath: input.filePath });
+
             try {
                 const { filePath } = input;
                 const absolutePath = path.join(tempPath, filePath);
@@ -71,7 +90,7 @@ export const ReadFile = (tempPath: string) => {
     });
 };
 
-export const WriteFile = (tempPath: string) => {
+export const WriteFile = (tempPath: string, agentId: string) => {
     const schema = z.object({
         filePath: z
             .string()
@@ -81,11 +100,23 @@ export const WriteFile = (tempPath: string) => {
         content: z.string().describe("The content to write to the file."),
     });
 
+    const functionLogger = logger.child({
+        agentId: agentId,
+        module: "tools/file-system",
+        function: "WriteFile",
+        tempPath: tempPath,
+    });
+
     return new DynamicStructuredTool({
         name: "write_file",
         description: "Writes content to a file.",
         schema: schema,
         func: async (input: z.infer<typeof schema>): Promise<string> => {
+            functionLogger.info("Writing file", {
+                filePath: input.filePath,
+                contentLength: input.content.length,
+            });
+
             try {
                 const { filePath, content } = input;
                 const absolutePath = path.join(tempPath, filePath);
@@ -93,23 +124,23 @@ export const WriteFile = (tempPath: string) => {
                 let cleanedContent = content.trim();
 
                 // Strip speech marks from beginning and end of content
-                if (cleanedContent.startsWith('"')) {
-                    cleanedContent = cleanedContent.slice(1);
-                }
-                if (cleanedContent.endsWith('"')) {
-                    cleanedContent = cleanedContent.slice(0, -1);
-                }
+                // if (cleanedContent.startsWith('"')) {
+                //     cleanedContent = cleanedContent.slice(1);
+                // }
+                // if (cleanedContent.endsWith('"')) {
+                //     cleanedContent = cleanedContent.slice(0, -1);
+                // }
 
                 // Replace newlines ascii with actual newlines
-                cleanedContent = cleanedContent.replace(/\\n/g, "\n");
+                // cleanedContent = cleanedContent.replace(/\\n/g, "\n");
 
                 // Remove weird backslashed characters
-                cleanedContent = cleanedContent
-                    .replace(/\\'/g, "'")
-                    .replace(/\\"/g, '"')
-                    .replace(/\\`/g, "`")
-                    .replace(/\\\$/g, "$")
-                    .replace(/\\\\/g, "\\");
+                // cleanedContent = cleanedContent
+                //     .replace(/\\'/g, "'")
+                //     .replace(/\\"/g, '"')
+                //     .replace(/\\`/g, "`")
+                //     .replace(/\\\$/g, "$")
+                //     .replace(/\\\\/g, "\\");
 
                 await fsp.writeFile(absolutePath, cleanedContent, "utf-8");
 
@@ -121,7 +152,7 @@ export const WriteFile = (tempPath: string) => {
     });
 };
 
-export const DeleteFile = (tempPath: string) => {
+export const DeleteFile = (tempPath: string, agentId: string) => {
     const schema = z.object({
         filePath: z
             .string()
@@ -130,11 +161,20 @@ export const DeleteFile = (tempPath: string) => {
             ),
     });
 
+    const functionLogger = logger.child({
+        agentId: agentId,
+        module: "tools/file-system",
+        function: "DeleteFile",
+        tempPath: tempPath,
+    });
+
     return new DynamicStructuredTool({
         name: "delete_file",
         description: "Deletes a file.",
         schema: schema,
         func: async (input: z.infer<typeof schema>): Promise<string> => {
+            functionLogger.info("Deleting file", { filePath: input.filePath });
+
             try {
                 const { filePath } = input;
                 const absolutePath = path.join(tempPath, filePath);
@@ -147,7 +187,7 @@ export const DeleteFile = (tempPath: string) => {
     });
 };
 
-export const ListDirectory = (tempPath: string) => {
+export const ListDirectory = (tempPath: string, agentId: string) => {
     const schema = z.object({
         dirPath: z
             .string()
@@ -156,11 +196,22 @@ export const ListDirectory = (tempPath: string) => {
             ),
     });
 
+    const functionLogger = logger.child({
+        agentId: agentId,
+        module: "tools/file-system",
+        function: "ListDirectory",
+        tempPath: tempPath,
+    });
+
     return new DynamicStructuredTool({
         name: "list_directory",
         description: "Lists the contents of a directory.",
         schema: schema,
         func: async (input: z.infer<typeof schema>): Promise<string> => {
+            functionLogger.info("Listing directory", {
+                dirPath: input.dirPath,
+            });
+
             try {
                 const { dirPath } = input;
                 const absolutePath = path.join(tempPath, dirPath);
@@ -178,7 +229,7 @@ export const ListDirectory = (tempPath: string) => {
     });
 };
 
-export const CreateDirectory = (tempPath: string) => {
+export const CreateDirectory = (tempPath: string, agentId: string) => {
     const schema = z.object({
         dirPath: z
             .string()
@@ -187,11 +238,22 @@ export const CreateDirectory = (tempPath: string) => {
             ),
     });
 
+    const functionLogger = logger.child({
+        agentId: agentId,
+        module: "tools/file-system",
+        function: "CreateDirectory",
+        tempPath: tempPath,
+    });
+
     return new DynamicStructuredTool({
         name: "create_directory",
         description: "Creates a new directory.",
         schema: schema,
         func: async (input: z.infer<typeof schema>): Promise<string> => {
+            functionLogger.info("Creating directory", {
+                dirPath: input.dirPath,
+            });
+
             try {
                 const { dirPath } = input;
                 const absolutePath = path.join(tempPath, dirPath);
@@ -204,7 +266,7 @@ export const CreateDirectory = (tempPath: string) => {
     });
 };
 
-export const RemoveDirectory = (tempPath: string) => {
+export const RemoveDirectory = (tempPath: string, agentId: string) => {
     const schema = z.object({
         dirPath: z
             .string()
@@ -213,11 +275,22 @@ export const RemoveDirectory = (tempPath: string) => {
             ),
     });
 
+    const functionLogger = logger.child({
+        agentId: agentId,
+        module: "tools/file-system",
+        function: "RemoveDirectory",
+        tempPath: tempPath,
+    });
+
     return new DynamicStructuredTool({
         name: "remove_directory",
         description: "Removes a directory.",
         schema: schema,
         func: async (input: z.infer<typeof schema>): Promise<string> => {
+            functionLogger.info("Removing directory", {
+                dirPath: input.dirPath,
+            });
+
             try {
                 const { dirPath } = input;
                 const absolutePath = path.join(tempPath, dirPath);
@@ -230,7 +303,7 @@ export const RemoveDirectory = (tempPath: string) => {
     });
 };
 
-export const PathExists = (tempPath: string) => {
+export const PathExists = (tempPath: string, agentId: string) => {
     const schema = z.object({
         pathToCheck: z
             .string()
@@ -239,11 +312,22 @@ export const PathExists = (tempPath: string) => {
             ),
     });
 
+    const functionLogger = logger.child({
+        agentId: agentId,
+        module: "tools/file-system",
+        function: "PathExists",
+        tempPath: tempPath,
+    });
+
     return new DynamicStructuredTool({
         name: "path_exists",
         description: "Checks if a path exists.",
         schema: schema,
         func: async (input: z.infer<typeof schema>): Promise<string> => {
+            functionLogger.info("Checking path existence", {
+                pathToCheck: input.pathToCheck,
+            });
+
             try {
                 const { pathToCheck } = input;
                 const absolutePath = path.join(tempPath, pathToCheck);
@@ -325,7 +409,7 @@ const getProcessableFiles = async (dirPath: string): Promise<string[]> => {
     return files;
 };
 
-export const SearchFiles = (tempPath: string) => {
+export const SearchFiles = (tempPath: string, agentId: string) => {
     const schema = z.object({
         dirPath: z
             .string()
@@ -340,11 +424,24 @@ export const SearchFiles = (tempPath: string) => {
             .describe("The number of top results to return."),
     });
 
+    const functionLogger = logger.child({
+        agentId: agentId,
+        module: "tools/file-system",
+        function: "SearchFiles",
+        tempPath: tempPath,
+    });
+
     return new DynamicStructuredTool({
         name: "search_files",
         description: "Searches for files in a directory based on a query.",
         schema: schema,
         func: async (input: z.infer<typeof schema>): Promise<string> => {
+            functionLogger.info("Searching files", {
+                dirPath: input.dirPath,
+                query: input.query,
+                topK: input.topK ?? 5,
+            });
+
             try {
                 const { dirPath, query, topK = 5 } = input;
 
@@ -399,8 +496,8 @@ export const SearchFiles = (tempPath: string) => {
                 }
 
                 // Create vector store and perform search
-                const embeddings = new OllamaEmbeddings({
-                    model: "nomic-embed-text",
+                const embeddings = createEmbeddingModelInstance({
+                    maxRetries: 7,
                 });
                 const vectorStore = await MemoryVectorStore.fromDocuments(
                     documents,
