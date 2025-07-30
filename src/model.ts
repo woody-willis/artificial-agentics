@@ -8,12 +8,20 @@ import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
 import { Embeddings } from "@langchain/core/embeddings";
 
+import { TokenBucket } from "simple-token-bucket";
+
 interface CreateModelInstanceOptions {
     modelName?: string;
     temperature?: number;
     maxRetries?: number;
     verbose?: boolean;
 }
+
+export const modelTokenBucket = new TokenBucket({
+    capacity: 50_000, // 50,000 tokens
+    fillQuantity: 50_000, // Refill 50,000 tokens
+    fillTime: 60 * 1000, // Refill every minute
+});
 
 /**
  * Creates an instance of a language model (LLM) for an agent.
